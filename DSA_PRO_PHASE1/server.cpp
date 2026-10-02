@@ -205,19 +205,78 @@ struct PendingPatch
 // PASS 0x0: READING source.bin + VALIDITY CHECK
 bool readSourceLine(ifstream& in, string& out)
 {
-   
+    while (getline(in, out)) {
+        if (!out.empty()) {
+            return true;
+        }
+    }
+    return false;
 }
 string firstWord(const string& line)
 {
-    
+    int i = 0;
+    string s = "";
+    while (i < line.length() && line[i] != ' ') {
+        s += line[i];
+        i++;
+    }
+    return s;
 }
 string secondWord(const string& line)
 {
-    
+    int i = 0;
+    string s = "";
+    while (i < line.length() && line[i] != ' ') {
+        i++;
+    }
+    while (i < line.length() && line[i] == ' ')
+    {
+        i++;
+    }
+
+    while (i < line.length() && line[i] != ' ') {
+        s += line[i];
+        i++;
+    }
+    return s;
+
 
 }
 bool validateProgram(const char* sourcePath)
 {
+    Stack<string> strStack;
+    ifstream fin;
+    string readLine;
+    fin.open(sourcePath, ios::binary);
+    if (!fin) {
+        return false;
+    }
+    string firstW;
+    while ((readSourceLine(fin, readLine))) {
+        firstW = firstWord(readLine);
+        if (firstW == "func") {
+            if (strStack.isEmpty()) {
+                strStack.push(firstW);
+            }
+            else {
+                return false;
+            }
+        }
+        else {
+            if (firstW == "func_end") {
+                if (strStack.isEmpty()) {
+                    return false;
+                }
+                else {
+                    strStack.pop();
+                }
+            }
+        }
+    }
+    if (strStack.isEmpty()) {
+        return true;
+    }
+    return false;
 }
 
 // PASS 0x1: RESOLVE() -> resolve.bin

@@ -4,11 +4,11 @@
 
 
 
-\## Progress
+\# Progress
 
 
 
-\### Project Setup
+\# Project Setup
 
 \- Created the project and GitHub repository.
 
@@ -20,29 +20,29 @@
 
 \- Studied the input source.bin format.
 
-\- Implemented a custom templated `Stack` class for maintaining the live call stack during execution.
+\- Implemented a custom templated Stack class for maintaining the live call stack during execution.
 
-\- Implemented a doubly linked list based `Timeline` for storing execution snapshots.
+\- Implemented a doubly linked list based Timeline for storing execution snapshots.
 
+PASS 0x0 — Source Validation
 
+-  Implemented readSourceLine()
+-  Implemented firstWord()
+-  Implemented secondWord()
+-  Implemented validateProgram()
+-  Reads source.bin
+-  Uses a stack to track active function declarations
 
-\### Stage 1 — Validation
+# Current Status
 
-\- Currently working on the validation stage.
+PASS 0x0 validation has been implemented
 
-\- Studying how to validate the structure of the input program.
+# In Progress
 
-\- Implementing validation for matching func and func\_end.
+-  PASS 0x1 — Resolve
+-  PASS 0x2 — Execute
+-  PASS 0x3 — Serialize 
 
-\- Working on detecting invalid nested function declarations and  matching func and func\_end
-
-
-
-\## Next Steps
-
-
-
-1\. Complete the Validation stage.
 
 
 
