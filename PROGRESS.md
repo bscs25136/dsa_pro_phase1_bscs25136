@@ -1,19 +1,11 @@
 \# Time-Travel Debugger — Phase 01 Progress
-
-
-
-
-
 \# Progress
-
-
 
 \# Project Setup
 
 \- Created the project and GitHub repository.
 
 \- Added progress.md for tracking project progress.
-
 
 
 \### Stage 0 — Receive
@@ -33,7 +25,7 @@ PASS 0x0 — Source Validation
 -  Reads source.bin
 -  Uses a stack to track active function declarations
 
-# Current Status
+# Current Status - 2 October 2026
 
 PASS 0x0 validation has been implemented
 
@@ -43,6 +35,36 @@ PASS 0x0 validation has been implemented
 -  PASS 0x2 — Execute
 -  PASS 0x3 — Serialize 
 
+# 4 October 2026 — Resolve
+
+# PASS 0x1 — Resolve
+
+- Implemented writeResolveRecord().
+- Implemented readResolveRecord().
+- Implemented resolveProgram().
+- Implemented storing every source line in resolve.bin
+- Implemented calculation of byte offsets for resolve records.
+- Implemented function tracking using FuncEntry.
+- Implemented tracking of unresolved function calls using PendingPatch.
+- Implemented detection of the main function and its offset.
+
+# Current Status
+
+# Completed
+
+- Project setup
+- PASS 0x0 — Source Validation
+- PASS 0x1 — Resolve
+- Custom Stack
+- Timeline data structure
+
+# In Progress
+
+- PASS 0x2 — Execution
+
+# Not Started
+
+- PASS 0x3 — Serialization
 
 
 

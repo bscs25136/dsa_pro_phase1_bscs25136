@@ -282,12 +282,23 @@ bool validateProgram(const char* sourcePath)
 // PASS 0x1: RESOLVE() -> resolve.bin
 int64_t writeResolveRecord(FILE* f, int64_t offsetField, const string& text)
 {
-    // writes one [offset(8B)][size(4B)][string] record at the current file position
-    // returns this record's own starting byte position
+    fwrite(&offsetField, sizeof(int64_t), 1, f);
+    int32_t sizeofString = text.size();
+    fwrite(&sizeofString, sizeof(int32_t), 1, f);
+    fwrite(text.data(), 1, text.size(), f);
+
+    return offsetField;
 }
 int64_t readResolveRecord(FILE* f, string& outText)
 {
-    // reads one record at the current position and advances past it, returns the offset field - the raw line text comes back untouched in outText.
+    int64_t offsetByte;
+    int32_t stringSize;
+
+    fread(&offsetByte, sizeof(int64_t), 1, f);
+    fread(&stringSize, sizeof(int32_t), 1, f);
+    outText.resize(stringSize);
+    fread(&outText[0], 1, stringSize, f);
+    return offsetByte;
 }
 int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
 {
@@ -295,6 +306,73 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
     int32_t funcCount = 0;
     PendingPatch patches[MAX_PATCHES];
     int32_t patchCount = 0;
+    FuncEntry funcArray[MAX_FUNCS];
+    int32_t funcCount = 0;
+    PendingPatch patches[MAX_PATCHES];
+    int32_t patchCount = 0;
+    ifstream fin(sourcePath, ios::binary);
+    if (!fin) {
+        return -1;
+    }
+    FILE* resolveFile_fout = fopen(resolveBinPath, "wb+");
+    if (!resolveFile_fout) {
+        return -1;
+    }
+    int64_t offset = 0;
+    int64_t mainOffset;
+    string line;
+    string firstW;
+    string secondW;
+    bool flag = false;
+    while (readSourceLine(fin, line)) {
+        writeResolveRecord(resolveFile_fout, offset, line);
+        firstW = firstWord(line);
+        secondW = secondWord(line);
+        if (firstW == "func") {
+            funcArray[funcCount].funcName = secondW;
+            funcArray[funcCount].byteOffsetInResolveBin = offset;
+            funcCount++;
+            if (secondW == "main") {
+                mainOffset = offset;
+                flag = true;
+            }
+        }
+        else if (firstW == "call") {
+            patches[patchCount].targetFuncName = secondW;
+            patches[patchCount].byteOffsetOfOffsetField = offset;
+            patchCount++;
+        }
+        offset = offset + 8 + 4 + line.size();
+    }
+    if (flag == false) {
+        return -1;
+    }
+    else {
+        flag = false;
+        int j = 0;
+        for (int i = 0; i < patchCount; i++) {
+            while (flag == false && j < funcCount) {
+                if (patches[i].targetFuncName == funcArray[j].funcName) {
+                    flag = true;
+                    fseek(resolveFile_fout, patches[i].byteOffsetOfOffsetField, SEEK_SET);
+                    fwrite(&funcArray[j].byteOffsetInResolveBin, sizeof(int64_t), 1, resolveFile_fout);
+                }
+                else {
+                    j++;
+                }
+            }
+            if (flag == false) {
+                return -1;
+            }
+            else {
+                j = 0;
+            }
+        }
+        fin.close();
+        fclose(resolveFile_fout);
+        return mainOffset;
+    }
+
     // Every source line becomes one record holding the raw line, as-is.
     // resolve() only PEEKS at the leading word(s) -- enough to spot FUNC
     // (remember its position) and CALL (remember which function it needs
