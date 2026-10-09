@@ -397,17 +397,222 @@ struct Token
 };
 int32_t tokenizeLine(const string& line, Token tokens[], int32_t maxTokens)
 {
-    // first word is always a instruction keyword
-    // instruction set = [func, func_end, call, set, add, sub, mul and div]
-    // next word is identifier like name of a function, variable name
-    // after identifier all are the params/arg, space separated
+    int i = 0;
+    int32_t tokenNum = 0;
+    string s = "";
+    while (i < line.size() && line[i] == ' ') {
+        i++;
+    }
+    while (i < line.size()) {
+        if (line[i] != ' ') {
+            s += line[i];
+            i++;
+        }
+        else {
+            i++;
+            if (tokenNum < maxTokens) {
+                if (tokenNum == 0) {
+                    tokens[tokenNum].type = KEYWORD;
+                }
+                else if (tokenNum == 1) {
+                    tokens[tokenNum].type = IDENTIFIER;
+
+                }
+                else {
+                    tokens[tokenNum].type = PARAM;
+                }
+                tokens[tokenNum].text = s;
+                tokenNum++;
+                s = "";
+            }
+        }
+    }
+    if (tokenNum < maxTokens) {
+        tokens[tokenNum].type = PARAM;
+        tokens[tokenNum].text = s;
+        tokenNum++;
+    }
+    return tokenNum;
 }
 Snapshot* buildSnapshot(Stack<Frame>& callStack)
 {
-    // build the snapshot based on the callStack given
+    Snapshot* snap = new Snapshot();
+    snap->stackDepth = callStack.depth();
+    callStack.snapshot_into(snap->callStack, MAX_STACK_DEPTH);
+    return snap;
 }
 void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& timeline)
 {
+    Stack<Frame> callStack;
+    Frame mainFrame;
+    mainFrame.func_name = "main";
+    mainFrame.argc = 0;
+    mainFrame.localCount = 0;
+    mainFrame.returnLine = -1;
+    callStack.push(mainFrame);
+    FILE* resolveFile_fin = fopen(resolveBinPath, "rb");
+    if (!resolveFile_fin) {
+        cout << "Unable to open resolve file\n";
+        return;
+    }
+    fseek(resolveFile_fin, 0, SEEK_END);
+    int64_t fileSize = ftell(resolveFile_fin);
+    fseek(resolveFile_fin, mainOffset, SEEK_SET);
+    string executionLine;
+    int64_t offset;
+    int64_t nextOffset;
+    Token lineTokens[MAX_TOKENS];
+    bool executed = false;
+    while (ftell(resolveFile_fin) < fileSize) {
+        offset = readResolveRecord(resolveFile_fin, executionLine);
+        nextOffset = ftell(resolveFile_fin);
+        int tokenCt = tokenizeLine(executionLine, lineTokens, MAX_TOKENS);
+        if (lineTokens[0].text == "func") {
+            Frame& topFrame = callStack.peek();
+            for (int i = 0; i < topFrame.argc; i++) {
+                topFrame.argv[i].name = lineTokens[i + 2].text;
+            }
+        }
+        else if (lineTokens[0].text == "call") {
+            Frame stackFrame;
+            stackFrame.localCount = 0;
+            stackFrame.func_name = lineTokens[1].text;
+            int i = 0;
+            stackFrame.argc = tokenCt - 2;
+            for (int i = 0; i < stackFrame.argc; i++) {
+                stackFrame.argv[i].value = stoi(lineTokens[i + 2].text);
+            }
+            stackFrame.returnLine = nextOffset;
+            fseek(resolveFile_fin, offset, SEEK_SET);
+            callStack.push(stackFrame);
+        }
+        else if (lineTokens[0].text == "add") {
+            bool flag = false;
+            Frame& topFrame = callStack.peek();
+            for (int i = 0; i < topFrame.argc; i++) {
+                if (topFrame.argv[i].name == lineTokens[1].text) {
+                    topFrame.argv[i].value += stoi(lineTokens[2].text);
+                    flag = true;
+                    break;
+                }
+            }
+            if (flag == false) {
+                for (int i = 0; i < topFrame.localCount; i++) {
+                    if (topFrame.locals[i].name == lineTokens[1].text) {
+                        topFrame.locals[i].value += stoi(lineTokens[2].text);
+                        break;
+                    }
+                }
+            }
+        }
+        else if (lineTokens[0].text == "mul") {
+            bool flag = false;
+            Frame& topFrame = callStack.peek();
+            for (int i = 0; i < topFrame.argc; i++) {
+                if (topFrame.argv[i].name == lineTokens[1].text) {
+                    topFrame.argv[i].value *= stoi(lineTokens[2].text);
+                    flag = true;
+                    break;
+                }
+            }
+            if (flag == false) {
+                for (int i = 0; i < topFrame.localCount; i++) {
+                    if (topFrame.locals[i].name == lineTokens[1].text) {
+                        topFrame.locals[i].value *= stoi(lineTokens[2].text);
+                        break;
+                    }
+                }
+            }
+        }
+        else if (lineTokens[0].text == "div") {
+            bool flag = false;
+            Frame& topFrame = callStack.peek();
+            for (int i = 0; i < topFrame.argc; i++) {
+                if (topFrame.argv[i].name == lineTokens[1].text) {
+                    topFrame.argv[i].value /= stoi(lineTokens[2].text);
+                    flag = true;
+                    break;
+                }
+            }
+            if (flag == false) {
+                for (int i = 0; i < topFrame.localCount; i++) {
+                    if (topFrame.locals[i].name == lineTokens[1].text) {
+                        topFrame.locals[i].value /= stoi(lineTokens[2].text);
+                        break;
+                    }
+                }
+            }
+        }
+        else if (lineTokens[0].text == "sub") {
+            bool flag = false;
+            Frame& topFrame = callStack.peek();
+            for (int i = 0; i < topFrame.argc; i++) {
+                if (topFrame.argv[i].name == lineTokens[1].text) {
+                    topFrame.argv[i].value -= stoi(lineTokens[2].text);
+                    flag = true;
+                    break;
+                }
+            }
+            if (flag == false) {
+                for (int i = 0; i < topFrame.localCount; i++) {
+                    if (topFrame.locals[i].name == lineTokens[1].text) {
+                        topFrame.locals[i].value -= stoi(lineTokens[2].text);
+                        break;
+                    }
+                }
+            }
+        }
+        else if (lineTokens[0].text == "set") {
+            bool flag = false;
+            Frame& topFrame = callStack.peek();
+            for (int i = 0; i < topFrame.argc; i++) {
+                if (topFrame.argv[i].name == lineTokens[1].text) {
+                    topFrame.argv[i].value = stoi(lineTokens[2].text);
+                    flag = true;
+                    break;
+                }
+            }
+            if (flag == false) {
+                for (int i = 0; i < topFrame.localCount; i++) {
+                    if (topFrame.locals[i].name == lineTokens[1].text) {
+                        topFrame.locals[i].value = stoi(lineTokens[2].text);
+                        flag = true;
+                        break;
+                    }
+                }
+            }
+            if (flag == false) {
+                if (topFrame.localCount < MAX_VARS_PER_FRAME) {
+                    topFrame.locals[topFrame.localCount].name = lineTokens[1].text;
+                    topFrame.locals[topFrame.localCount].value = stoi(lineTokens[2].text);
+                    topFrame.localCount++;
+                    flag = true;
+                }
+
+            }
+        }
+        else if (lineTokens[0].text == "func_end") {
+
+            Frame topFrame = callStack.peek();
+            if (topFrame.func_name != "main") {
+
+                int64_t returnOffset = topFrame.returnLine;
+                callStack.pop();
+                fseek(resolveFile_fin, returnOffset, SEEK_SET);
+
+            }
+            else {
+                executed = true;
+            }
+
+        }
+        Snapshot* snap = buildSnapshot(callStack);
+        timeline.record(snap);
+        if (executed == true) {
+            break;
+        }
+    }
+    fclose(resolveFile_fin);
     // initialize the call stack
     // make the main frame
     // push main frame on the call stack
