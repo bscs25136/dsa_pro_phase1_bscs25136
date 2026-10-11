@@ -74,3 +74,10 @@ PASS 0x0 — Source Validation
 - will implement its code for it being a var tom - (add a b)
 - will also work on serialization part tom
 - ill and alr did some assumptions as no exact structure of source specified
+
+- 10-11 Oct
+- i worked on execution completely also i made 1 helper function to find the variable in my stack's arguments and locals 
+- ive implemented another struct to basically update my arguments value later to reflect that update in my main program - when call happens during execution new frame is created but that update doesnt reflect in the caller frame
+- chnaged my arithematic so that ow it also handles (a + b) and not only (a + numeric operand)
+- update my func_end to handle that reflect update in vars thing
+- now working on serialization

@@ -63,7 +63,6 @@ public:
     T pop() {
         if (count == 0) {
             throw runtime_error("Stack is empty\n");
-            return;
         }
         Node* temp = top;
         T val = temp->data;
@@ -306,10 +305,6 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
     int32_t funcCount = 0;
     PendingPatch patches[MAX_PATCHES];
     int32_t patchCount = 0;
-    FuncEntry funcArray[MAX_FUNCS];
-    int32_t funcCount = 0;
-    PendingPatch patches[MAX_PATCHES];
-    int32_t patchCount = 0;
     ifstream fin(sourcePath, ios::binary);
     if (!fin) {
         return -1;
@@ -328,6 +323,7 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
         writeResolveRecord(resolveFile_fout, offset, line);
         firstW = firstWord(line);
         secondW = secondWord(line);
+
         if (firstW == "func") {
             funcArray[funcCount].funcName = secondW;
             funcArray[funcCount].byteOffsetInResolveBin = offset;
@@ -356,6 +352,7 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
                     flag = true;
                     fseek(resolveFile_fout, patches[i].byteOffsetOfOffsetField, SEEK_SET);
                     fwrite(&funcArray[j].byteOffsetInResolveBin, sizeof(int64_t), 1, resolveFile_fout);
+
                 }
                 else {
                     j++;
@@ -366,13 +363,13 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
             }
             else {
                 j = 0;
+                flag = false;
             }
         }
         fin.close();
         fclose(resolveFile_fout);
         return mainOffset;
     }
-
     // Every source line becomes one record holding the raw line, as-is.
     // resolve() only PEEKS at the leading word(s) -- enough to spot FUNC
     // (remember its position) and CALL (remember which function it needs
@@ -441,9 +438,29 @@ Snapshot* buildSnapshot(Stack<Frame>& callStack)
     callStack.snapshot_into(snap->callStack, MAX_STACK_DEPTH);
     return snap;
 }
+Variable* findVariable(Frame& frame, const string& name) {
+    for (int i = 0; i < frame.argc; i++) {
+        if (frame.argv[i].name == name) {
+            return &frame.argv[i];
+        }
+    }
+
+    for (int i = 0; i < frame.localCount; i++) {
+        if (frame.locals[i].name == name) {
+            return &frame.locals[i];
+        }
+    }
+
+    return nullptr;
+}
+struct argsUpdate {
+    int32_t argC;
+    string callerVar[MAX_VARS_PER_FRAME];
+};
 void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& timeline)
 {
     Stack<Frame> callStack;
+    Stack<argsUpdate> callerVarStack;
     Frame mainFrame;
     mainFrame.func_name = "main";
     mainFrame.argc = 0;
@@ -467,98 +484,424 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
         offset = readResolveRecord(resolveFile_fin, executionLine);
         nextOffset = ftell(resolveFile_fin);
         int tokenCt = tokenizeLine(executionLine, lineTokens, MAX_TOKENS);
+
         if (lineTokens[0].text == "func") {
             Frame& topFrame = callStack.peek();
+            int funcPara = tokenCt - 2;
+
+            if (funcPara != topFrame.argc) {
+                cout << "Argument count mismatch in function: " << topFrame.func_name << '\n';
+                break;
+            }
+
             for (int i = 0; i < topFrame.argc; i++) {
                 topFrame.argv[i].name = lineTokens[i + 2].text;
             }
         }
         else if (lineTokens[0].text == "call") {
+            Frame& callerFrame = callStack.peek();
+
             Frame stackFrame;
             stackFrame.localCount = 0;
             stackFrame.func_name = lineTokens[1].text;
             int i = 0;
             stackFrame.argc = tokenCt - 2;
-            for (int i = 0; i < stackFrame.argc; i++) {
-                stackFrame.argv[i].value = stoi(lineTokens[i + 2].text);
+            if (stackFrame.argc > MAX_VARS_PER_FRAME) {
+                cout << "Too many function arguments\n";
+                break;
             }
-            stackFrame.returnLine = nextOffset;
-            fseek(resolveFile_fin, offset, SEEK_SET);
-            callStack.push(stackFrame);
+
+            if (callStack.depth() >= MAX_STACK_DEPTH) {
+                cout << "Maximum call stack depth reached\n";
+                break;
+            }
+            bool valid = true;
+
+            argsUpdate info{};
+            info.argC = stackFrame.argc;
+            string arg;
+            bool isNumber = true;
+            bool foundFlag = false;
+
+            for (int i = 0; i < stackFrame.argc; i++) {
+                isNumber = true;
+                arg = lineTokens[i + 2].text;
+                for (int j = 0; j < arg.size(); j++) {
+                    if (!isdigit(arg[j])) {
+                        isNumber = false;
+                        break;
+                    }
+                }
+                if (isNumber) {
+                    stackFrame.argv[i].value = stoi(lineTokens[i + 2].text);
+                    info.callerVar[i] = "";
+
+                }
+                else {
+                    int val;
+                    foundFlag = false;
+                    for (int j = 0; j < callerFrame.argc; j++) {
+                        if (callerFrame.argv[j].name == arg) {
+                            val = callerFrame.argv[j].value;
+                            foundFlag = true;
+                            break;
+
+                        }
+                    }
+
+                    if (foundFlag == false) {
+                        for (int j = 0; j < callerFrame.localCount; j++) {
+                            if (callerFrame.locals[j].name == arg) {
+                                val = callerFrame.locals[j].value;
+                                foundFlag = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (foundFlag == false) {
+                        cout << "Undefined argument variable: " << arg << '\n';
+                        valid = false;
+                        break;
+                    }
+
+                    stackFrame.argv[i].value = val;
+                    info.callerVar[i] = arg;
+                }
+            }
+            if (valid) {
+                stackFrame.returnLine = nextOffset;
+                fseek(resolveFile_fin, offset, SEEK_SET);
+
+                callerVarStack.push(info);
+                callStack.push(stackFrame);
+
+            }
+            else {
+                break;
+            }
         }
         else if (lineTokens[0].text == "add") {
             bool flag = false;
             Frame& topFrame = callStack.peek();
-            for (int i = 0; i < topFrame.argc; i++) {
-                if (topFrame.argv[i].name == lineTokens[1].text) {
-                    topFrame.argv[i].value += stoi(lineTokens[2].text);
-                    flag = true;
+            bool isNumber = true;
+            for (int i = 0; i < lineTokens[2].text.size(); i++) {
+                if (!isdigit(lineTokens[2].text[i])) {
+                    isNumber = false;
                     break;
                 }
             }
-            if (flag == false) {
-                for (int i = 0; i < topFrame.localCount; i++) {
-                    if (topFrame.locals[i].name == lineTokens[1].text) {
-                        topFrame.locals[i].value += stoi(lineTokens[2].text);
+            if (isNumber) {
+                for (int i = 0; i < topFrame.argc; i++) {
+                    if (topFrame.argv[i].name == lineTokens[1].text) {
+                        topFrame.argv[i].value += stoi(lineTokens[2].text);
+                        flag = true;
                         break;
                     }
+                }
+                if (flag == false) {
+                    for (int i = 0; i < topFrame.localCount; i++) {
+                        if (topFrame.locals[i].name == lineTokens[1].text) {
+                            topFrame.locals[i].value += stoi(lineTokens[2].text);
+                            flag = true;
+                            break;
+                        }
+                    }
+                }
+                if (flag == false) {
+                    cout << "Destination variable not found\n";
+                    break;
+                }
+            }
+            else {
+                int val;
+                for (int i = 0; i < topFrame.argc; i++) {
+                    if (topFrame.argv[i].name == lineTokens[2].text) {
+                        val = topFrame.argv[i].value;
+                        flag = true;
+                        break;
+                    }
+                }
+                if (flag == false) {
+                    for (int i = 0; i < topFrame.localCount; i++) {
+                        if (topFrame.locals[i].name == lineTokens[2].text) {
+                            val = topFrame.locals[i].value;
+                            flag = true;
+                            break;
+                        }
+                    }
+                }
+                if (flag == false) {
+                    cout << "Other variable not found\n";
+                    break;
+                }
+                flag = false;
+                for (int i = 0; i < topFrame.argc; i++) {
+                    if (topFrame.argv[i].name == lineTokens[1].text) {
+                        topFrame.argv[i].value += val;
+                        flag = true;
+                        break;
+                    }
+
+                }
+                if (flag == false) {
+                    for (int i = 0; i < topFrame.localCount; i++) {
+                        if (topFrame.locals[i].name == lineTokens[1].text) {
+                            topFrame.locals[i].value += val;
+                            flag = true;
+                            break;
+                        }
+
+                    }
+                }
+                if (flag == false) {
+                    cout << "Destination variable not found\n";
+                    break;
                 }
             }
         }
+
         else if (lineTokens[0].text == "mul") {
             bool flag = false;
             Frame& topFrame = callStack.peek();
-            for (int i = 0; i < topFrame.argc; i++) {
-                if (topFrame.argv[i].name == lineTokens[1].text) {
-                    topFrame.argv[i].value *= stoi(lineTokens[2].text);
-                    flag = true;
+            bool isNumber = true;
+            for (int i = 0; i < lineTokens[2].text.size(); i++) {
+                if (!isdigit(lineTokens[2].text[i])) {
+                    isNumber = false;
                     break;
                 }
             }
-            if (flag == false) {
-                for (int i = 0; i < topFrame.localCount; i++) {
-                    if (topFrame.locals[i].name == lineTokens[1].text) {
-                        topFrame.locals[i].value *= stoi(lineTokens[2].text);
+            if (isNumber) {
+                for (int i = 0; i < topFrame.argc; i++) {
+                    if (topFrame.argv[i].name == lineTokens[1].text) {
+                        topFrame.argv[i].value *= stoi(lineTokens[2].text);
+                        flag = true;
                         break;
                     }
+                }
+                if (flag == false) {
+                    for (int i = 0; i < topFrame.localCount; i++) {
+                        if (topFrame.locals[i].name == lineTokens[1].text) {
+                            topFrame.locals[i].value *= stoi(lineTokens[2].text);
+                            flag = true;
+                            break;
+                        }
+                    }
+                }
+                if (flag == false) {
+                    cout << "Destination variable not found\n";
+                    break;
+                }
+            }
+            else {
+                int val;
+                for (int i = 0; i < topFrame.argc; i++) {
+                    if (topFrame.argv[i].name == lineTokens[2].text) {
+                        val = topFrame.argv[i].value;
+                        flag = true;
+                        break;
+                    }
+                }
+                if (flag == false) {
+                    for (int i = 0; i < topFrame.localCount; i++) {
+                        if (topFrame.locals[i].name == lineTokens[2].text) {
+                            val = topFrame.locals[i].value;
+                            flag = true;
+                            break;
+                        }
+                    }
+                }
+                if (flag == false) {
+                    cout << "Other variable not found\n";
+                    break;
+                }
+                flag = false;
+                for (int i = 0; i < topFrame.argc; i++) {
+                    if (topFrame.argv[i].name == lineTokens[1].text) {
+                        topFrame.argv[i].value *= val;
+                        flag = true;
+                        break;
+                    }
+
+                }
+                if (flag == false) {
+                    for (int i = 0; i < topFrame.localCount; i++) {
+                        if (topFrame.locals[i].name == lineTokens[1].text) {
+                            topFrame.locals[i].value *= val;
+                            flag = true;
+                            break;
+                        }
+
+                    }
+                }
+                if (flag == false) {
+                    cout << "Destination variable not found\n";
+                    break;
                 }
             }
         }
         else if (lineTokens[0].text == "div") {
             bool flag = false;
             Frame& topFrame = callStack.peek();
-            for (int i = 0; i < topFrame.argc; i++) {
-                if (topFrame.argv[i].name == lineTokens[1].text) {
-                    topFrame.argv[i].value /= stoi(lineTokens[2].text);
-                    flag = true;
+            bool isNumber = true;
+            for (int i = 0; i < lineTokens[2].text.size(); i++) {
+                if (!isdigit(lineTokens[2].text[i])) {
+                    isNumber = false;
                     break;
                 }
             }
-            if (flag == false) {
-                for (int i = 0; i < topFrame.localCount; i++) {
-                    if (topFrame.locals[i].name == lineTokens[1].text) {
-                        topFrame.locals[i].value /= stoi(lineTokens[2].text);
+            if (isNumber) {
+                if (stoi(lineTokens[2].text) == 0) {
+                    cout << "Division by zero\n";
+                    break;
+                }
+                for (int i = 0; i < topFrame.argc; i++) {
+                    if (topFrame.argv[i].name == lineTokens[1].text) {
+                        topFrame.argv[i].value /= stoi(lineTokens[2].text);
+                        flag = true;
                         break;
                     }
+                }
+                if (flag == false) {
+                    for (int i = 0; i < topFrame.localCount; i++) {
+                        if (topFrame.locals[i].name == lineTokens[1].text) {
+                            topFrame.locals[i].value /= stoi(lineTokens[2].text);
+                            flag = true;
+                            break;
+                        }
+                    }
+                }
+                if (flag == false) {
+                    cout << "Destination variable not found\n";
+                    break;
+                }
+            }
+            else {
+                int val;
+                for (int i = 0; i < topFrame.argc; i++) {
+                    if (topFrame.argv[i].name == lineTokens[2].text) {
+                        val = topFrame.argv[i].value;
+                        flag = true;
+                        break;
+                    }
+                }
+                if (flag == false) {
+                    for (int i = 0; i < topFrame.localCount; i++) {
+                        if (topFrame.locals[i].name == lineTokens[2].text) {
+                            val = topFrame.locals[i].value;
+                            flag = true;
+                            break;
+                        }
+                    }
+                }
+                if (flag == false) {
+                    cout << "Other variable not found\n";
+                    break;
+                }
+                if (val == 0) {
+                    cout << "Division by zero\n";
+                    break;
+                }
+                flag = false;
+                for (int i = 0; i < topFrame.argc; i++) {
+                    if (topFrame.argv[i].name == lineTokens[1].text) {
+                        topFrame.argv[i].value /= val;
+                        flag = true;
+                        break;
+                    }
+
+                }
+                if (flag == false) {
+                    for (int i = 0; i < topFrame.localCount; i++) {
+                        if (topFrame.locals[i].name == lineTokens[1].text) {
+                            topFrame.locals[i].value /= val;
+                            flag = true;
+                            break;
+                        }
+
+                    }
+                }
+                if (flag == false) {
+                    cout << "Destination variable not found\n";
+                    break;
                 }
             }
         }
         else if (lineTokens[0].text == "sub") {
             bool flag = false;
             Frame& topFrame = callStack.peek();
-            for (int i = 0; i < topFrame.argc; i++) {
-                if (topFrame.argv[i].name == lineTokens[1].text) {
-                    topFrame.argv[i].value -= stoi(lineTokens[2].text);
-                    flag = true;
+            bool isNumber = true;
+            for (int i = 0; i < lineTokens[2].text.size(); i++) {
+                if (!isdigit(lineTokens[2].text[i])) {
+                    isNumber = false;
                     break;
                 }
             }
-            if (flag == false) {
-                for (int i = 0; i < topFrame.localCount; i++) {
-                    if (topFrame.locals[i].name == lineTokens[1].text) {
-                        topFrame.locals[i].value -= stoi(lineTokens[2].text);
+            if (isNumber) {
+                for (int i = 0; i < topFrame.argc; i++) {
+                    if (topFrame.argv[i].name == lineTokens[1].text) {
+                        topFrame.argv[i].value -= stoi(lineTokens[2].text);
+                        flag = true;
                         break;
                     }
+                }
+                if (flag == false) {
+                    for (int i = 0; i < topFrame.localCount; i++) {
+                        if (topFrame.locals[i].name == lineTokens[1].text) {
+                            topFrame.locals[i].value -= stoi(lineTokens[2].text);
+                            flag = true;
+                            break;
+                        }
+                    }
+                }
+                if (flag == false) {
+                    cout << "Destination variable not found\n";
+                    break;
+                }
+            }
+            else {
+                int val;
+                for (int i = 0; i < topFrame.argc; i++) {
+                    if (topFrame.argv[i].name == lineTokens[2].text) {
+                        val = topFrame.argv[i].value;
+                        flag = true;
+                        break;
+                    }
+                }
+                if (flag == false) {
+                    for (int i = 0; i < topFrame.localCount; i++) {
+                        if (topFrame.locals[i].name == lineTokens[2].text) {
+                            val = topFrame.locals[i].value;
+                            flag = true;
+                            break;
+                        }
+                    }
+                }
+                if (flag == false) {
+                    cout << "Other variable not found\n";
+                    break;
+                }
+                flag = false;
+                for (int i = 0; i < topFrame.argc; i++) {
+                    if (topFrame.argv[i].name == lineTokens[1].text) {
+                        topFrame.argv[i].value -= val;
+                        flag = true;
+                        break;
+                    }
+
+                }
+                if (flag == false) {
+                    for (int i = 0; i < topFrame.localCount; i++) {
+                        if (topFrame.locals[i].name == lineTokens[1].text) {
+                            topFrame.locals[i].value -= val;
+                            flag = true;
+                            break;
+                        }
+
+                    }
+                }
+                if (flag == false) {
+                    cout << "Destination variable not found\n";
+                    break;
                 }
             }
         }
@@ -592,12 +935,22 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
             }
         }
         else if (lineTokens[0].text == "func_end") {
-
             Frame topFrame = callStack.peek();
             if (topFrame.func_name != "main") {
-
+                argsUpdate info = callerVarStack.peek();
                 int64_t returnOffset = topFrame.returnLine;
                 callStack.pop();
+                callerVarStack.pop();
+                Frame& callerFrame = callStack.peek();
+                for (int i = 0; i < info.argC; i++) {
+                    if (info.callerVar[i].empty()) {
+                        continue;
+                    }
+                    Variable* argFound = findVariable(callerFrame, info.callerVar[i]);
+                    if (argFound != nullptr) {
+                        argFound->value = topFrame.argv[i].value;
+                    }
+                }
                 fseek(resolveFile_fin, returnOffset, SEEK_SET);
 
             }
@@ -613,14 +966,8 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
         }
     }
     fclose(resolveFile_fin);
-    // initialize the call stack
-    // make the main frame
-    // push main frame on the call stack
-
-    // implementation:
-    // execute line by line, and according to the keyword perform action
 }
-
+    
 // PASS 0x3: SERIALIZE TIMELINE
 void writeTdbg(Timeline& timeline, const char* tdbgPath)
 {
