@@ -179,11 +179,13 @@ struct TTDBHeader
     int32_t stepCount;
     int64_t indexOffset;
 };
+
 void writeHeader(FILE* f, const TTDBHeader& h)
 {
     fwrite(h.magic, 1, 4, f);
     fwrite(&h.version, sizeof(int32_t), 1, f);
-
+    fwrite(&h.stepCount, sizeof(int32_t), 1, f);
+    fwrite(&h.indexOffset, sizeof(int64_t), 1, f);
     // placeholder for other two data members
 }
 
@@ -968,31 +970,100 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
     fclose(resolveFile_fin);
 }
     
-// PASS 0x3: SERIALIZE TIMELINE
+void serializeString(FILE* fileP, const string& s) {
+    int32_t stringSize = s.size();
+    fwrite(&stringSize, sizeof(int32_t), 1, fileP);
+    fwrite(s.data(), 1, stringSize, fileP);
+}
+void serializeFrame(FILE* fileP, const Frame& frame) {
+    serializeString(fileP, frame.func_name);
+    fwrite(&frame.argc, sizeof(int32_t), 1, fileP);
+    for (int i = 0; i < frame.argc; i++) {
+        serializeString(fileP, frame.argv[i].name);
+        fwrite(&frame.argv[i].value, sizeof(int32_t), 1, fileP);
+    }
+    fwrite(&frame.returnLine, sizeof(int64_t), 1, fileP);
+    fwrite(&frame.localCount, sizeof(int32_t), 1, fileP);
+    for (int i = 0; i < frame.localCount; i++) {
+        serializeString(fileP, frame.locals[i].name);
+        fwrite(&frame.locals[i].value, sizeof(int32_t), 1, fileP);
+    }
+}
 void writeTdbg(Timeline& timeline, const char* tdbgPath)
 {
-    // placeholder for header
-    // index array of the size of stepcount from the timeline
-    // placing each snapshot in the file while maintaining the index(starting point of each nth snapshot)
-    // after timeline add the index array i the file
-    // update the header
+    FILE* fileTdbg = fopen(tdbgPath, "wb+");
+    if (!fileTdbg) {
+        cout << "Unable to open\n";
+        return;
+    }
+    TTDBHeader header;
+    header.magic[0] = 'T';
+    header.magic[1] = 'T';
+    header.magic[2] = 'D';
+    header.magic[3] = 'B';
+    header.version = 1;
+    header.indexOffset = 0;
+    header.stepCount = timeline.getStepCount();
+    writeHeader(fileTdbg, header);
+    if (header.stepCount == 0) {
+        fclose(fileTdbg);
+        return;
+    }
+    int64_t snapOffset;
+    int64_t* snapshotPosition = new int64_t[header.stepCount];
+
+    TimelineNode* snap = timeline.begin();
+    int snapCount = 0;
+    while (snap != nullptr) {
+        snapOffset = ftell(fileTdbg);
+        if (snapCount >= header.stepCount) {
+            cout << "Too many snapshots\n";
+            delete[] snapshotPosition;
+            fclose(fileTdbg);
+            return;
+        }
+        snapshotPosition[snapCount++] = snapOffset;
+        fwrite(&snap->data->stackDepth, sizeof(int32_t), 1, fileTdbg);
+        for (int i = 0; i < snap->data->stackDepth; i++) {
+            serializeFrame(fileTdbg, snap->data->callStack[i]);
+        }
+        snap = snap->next;
+    }
+    header.indexOffset = ftell(fileTdbg);
+    if (snapCount != header.stepCount) {
+        cout << "Snapshot count mismatch\n";
+        delete[] snapshotPosition;
+        fclose(fileTdbg);
+        return;
+    }
+    fwrite(snapshotPosition, sizeof(int64_t), snapCount, fileTdbg);
+    fseek(fileTdbg, 0, SEEK_SET);
+    writeHeader(fileTdbg, header);
+
+    delete[] snapshotPosition;
+    fclose(fileTdbg);
 }
 // main section
 int32_t main()
 {
-
     if (!validateProgram("source.bin"))
     {
+        cout << "Failed at validateProgram()\n";
         // send an error response instead of a .tdbg file
         return 1;
     }
+    cout << "Validation passed!\n";
 
     int64_t mainOffset = resolveProgram("source.bin", "resolve.bin");
-
+    if (mainOffset < 0) {
+        cout << "Program resolution failed.\n";
+        return 1;
+    }
     Timeline timeline;
     executeProgram("resolve.bin", mainOffset, timeline);
-
+    
     writeTdbg(timeline, "session.tdbg");
+    
 
     return 0;
 }

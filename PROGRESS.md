@@ -81,3 +81,9 @@ PASS 0x0 — Source Validation
 - chnaged my arithematic so that ow it also handles (a + b) and not only (a + numeric operand)
 - update my func_end to handle that reflect update in vars thing
 - now working on serialization
+
+
+- 12 Oct
+- done with my serialization part i added 2 helper functions to serialze strging and other for serializing a frame as whole
+- tests my prog and its working successfully
+
