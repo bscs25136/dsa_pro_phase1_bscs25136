@@ -343,6 +343,8 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
         offset = offset + 8 + 4 + line.size();
     }
     if (flag == false) {
+        fin.close();
+        fclose(resolveFile_fout);
         return -1;
     }
     else {
@@ -361,6 +363,8 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
                 }
             }
             if (flag == false) {
+                fin.close();
+                fclose(resolveFile_fout);
                 return -1;
             }
             else {
@@ -426,11 +430,24 @@ int32_t tokenizeLine(const string& line, Token tokens[], int32_t maxTokens)
             }
         }
     }
-    if (tokenNum < maxTokens) {
-        tokens[tokenNum].type = PARAM;
+    if (tokenNum >= 2) {
+        if (tokenNum < maxTokens) {
+            tokens[tokenNum].type = PARAM;
+            tokens[tokenNum].text = s;
+            tokenNum++;
+        }
+    }
+    else {
+        if (tokenNum == 0) {
+            tokens[tokenNum].type = KEYWORD;
+        }
+        else {
+            tokens[tokenNum].type = IDENTIFIER;
+        }
         tokens[tokenNum].text = s;
         tokenNum++;
     }
+
     return tokenNum;
 }
 Snapshot* buildSnapshot(Stack<Frame>& callStack)
