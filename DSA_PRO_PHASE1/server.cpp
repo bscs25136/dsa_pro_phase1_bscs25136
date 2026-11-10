@@ -7,27 +7,24 @@
 //   3. Pass 0X2   -- execute resolve.bin: tokenize ONE line at a time, update the call stack, take a snapshot -> Timeline
 //   4. Pass 0X3   -- serialize Timeline -> session.tdbg(header + snapshot records + dense index)
 
-
+#include "helper.h"
 #include <iostream>
 #include <string>
 #include <cstdint>
 #include <fstream>
 #include <unistd.h>
+#include <cerrno>
+#include <sys/types.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <cstdint>
 #include <cstdio>
 #include <stack>
 using namespace std;
 
 // ---- Constants ----S
-const int32_t MAX_VARS_PER_FRAME = 16;
-const int32_t MAX_STACK_DEPTH = 64;
-const int32_t MAX_FUNCS = 128;
-const int32_t MAX_TOKENS = MAX_VARS_PER_FRAME + 2; // kW + func_name + upto 16 params/args
-const int32_t MAX_PATCHES = MAX_FUNCS * 4;
-const uint64_t MAX_SOURCE_BYTES = 15ULL * 1024 * 1024; // sanity cap on the declared file length
-const int32_t IO_BUFFER_SIZE = 64 * 1024;                  // fixed buffer for streaming to/from disk
-const int32_t SOCKET_TIMEOUT_SEC = 5;                      // TODO: apply as SO_RCVTIMEO so a deadclient can't hang the server forever
+
 
 // ---- Custom data structures
 
@@ -101,7 +98,7 @@ public:
 
 // Timeline : doubly linked list of Snapshots
 struct Snapshot; // fwd declaration;
-struct TimelineNode{
+struct TimelineNode {
     Snapshot* data;
     TimelineNode* next;
     TimelineNode* prev;
@@ -123,7 +120,7 @@ public:
         head = tail = nullptr;
         stepCount = 0;
     }
-    void record(Snapshot* s){
+    void record(Snapshot* s) {
         if (stepCount == 0) {
             TimelineNode* t = new TimelineNode(s);
             head = tail = t;
@@ -153,53 +150,27 @@ public:
 };
 
 // Core structs
-struct Variable
-{
-    string name;
-    int32_t value;
-};
-struct Frame
-{
-    string func_name;
-    int32_t argc;
-    Variable argv[MAX_VARS_PER_FRAME];
-    int64_t returnLine;
-    Variable locals[MAX_VARS_PER_FRAME];
-    int32_t localCount;
-};
-struct Snapshot
-{
-    Frame callStack[MAX_STACK_DEPTH];
-    int32_t stackDepth;
-};
-struct TTDBHeader
-{
-    char magic[4]; // "TTDB"
-    int32_t version;
-    int32_t stepCount;
-    int64_t indexOffset;
-};
 
-void writeHeader(FILE* f, const TTDBHeader& h)
+
+bool writeHeader(FILE* f, const TTDBHeader& h)
 {
-    fwrite(h.magic, 1, 4, f);
-    fwrite(&h.version, sizeof(int32_t), 1, f);
-    fwrite(&h.stepCount, sizeof(int32_t), 1, f);
-    fwrite(&h.indexOffset, sizeof(int64_t), 1, f);
+    if (fwrite(h.magic, 1, 4, f) != 4) {
+        return false;
+    }
+    if (fwrite(&h.version, sizeof(int32_t), 1, f) != 1) {
+        return false;
+    }
+    if (fwrite(&h.stepCount, sizeof(int32_t), 1, f) != 1) {
+        return false;
+    }
+    if (fwrite(&h.indexOffset, sizeof(int64_t), 1, f) != 1) {
+        return false;
+    }
+    return true;
     // placeholder for other two data members
 }
 
 // resolve.bin - bookkeeping
-struct FuncEntry
-{
-    string funcName;
-    int64_t byteOffsetInResolveBin; // where this function's FUNC header record sits
-};
-struct PendingPatch
-{
-    int64_t byteOffsetOfOffsetField; // where in resolve.bin to seek back and overwrite
-    string targetFuncName;
-};
 
 
 
@@ -476,8 +447,9 @@ struct argsUpdate {
     int32_t argC;
     string callerVar[MAX_VARS_PER_FRAME];
 };
-void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& timeline)
+bool executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& timeline)
 {
+    bool succesfulExecution = true;
     Stack<Frame> callStack;
     Stack<argsUpdate> callerVarStack;
     Frame mainFrame;
@@ -489,7 +461,7 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
     FILE* resolveFile_fin = fopen(resolveBinPath, "rb");
     if (!resolveFile_fin) {
         cout << "Unable to open resolve file\n";
-        return;
+        return false;
     }
     fseek(resolveFile_fin, 0, SEEK_END);
     int64_t fileSize = ftell(resolveFile_fin);
@@ -510,6 +482,7 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
 
             if (funcPara != topFrame.argc) {
                 cout << "Argument count mismatch in function: " << topFrame.func_name << '\n';
+               succesfulExecution = false;
                 break;
             }
 
@@ -527,11 +500,13 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
             stackFrame.argc = tokenCt - 2;
             if (stackFrame.argc > MAX_VARS_PER_FRAME) {
                 cout << "Too many function arguments\n";
+                succesfulExecution = false;
                 break;
             }
 
             if (callStack.depth() >= MAX_STACK_DEPTH) {
                 cout << "Maximum call stack depth reached\n";
+                succesfulExecution = false;
                 break;
             }
             bool valid = true;
@@ -579,6 +554,7 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
                     }
                     if (foundFlag == false) {
                         cout << "Undefined argument variable: " << arg << '\n';
+                        
                         valid = false;
                         break;
                     }
@@ -596,6 +572,7 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
 
             }
             else {
+                succesfulExecution = false;
                 break;
             }
         }
@@ -628,6 +605,7 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
                 }
                 if (flag == false) {
                     cout << "Destination variable not found\n";
+                    succesfulExecution = false;
                     break;
                 }
             }
@@ -651,6 +629,7 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
                 }
                 if (flag == false) {
                     cout << "Other variable not found\n";
+                    succesfulExecution = false;
                     break;
                 }
                 flag = false;
@@ -674,6 +653,7 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
                 }
                 if (flag == false) {
                     cout << "Destination variable not found\n";
+                    succesfulExecution = false;
                     break;
                 }
             }
@@ -708,6 +688,7 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
                 }
                 if (flag == false) {
                     cout << "Destination variable not found\n";
+                    succesfulExecution = false;
                     break;
                 }
             }
@@ -731,6 +712,7 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
                 }
                 if (flag == false) {
                     cout << "Other variable not found\n";
+                    succesfulExecution = false;
                     break;
                 }
                 flag = false;
@@ -754,6 +736,7 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
                 }
                 if (flag == false) {
                     cout << "Destination variable not found\n";
+                    succesfulExecution = false;
                     break;
                 }
             }
@@ -771,6 +754,7 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
             if (isNumber) {
                 if (stoi(lineTokens[2].text) == 0) {
                     cout << "Division by zero\n";
+                    succesfulExecution = false;
                     break;
                 }
                 for (int i = 0; i < topFrame.argc; i++) {
@@ -791,6 +775,7 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
                 }
                 if (flag == false) {
                     cout << "Destination variable not found\n";
+                    succesfulExecution = false;
                     break;
                 }
             }
@@ -814,10 +799,12 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
                 }
                 if (flag == false) {
                     cout << "Other variable not found\n";
+                    succesfulExecution = false;
                     break;
                 }
                 if (val == 0) {
                     cout << "Division by zero\n";
+                    succesfulExecution = false;
                     break;
                 }
                 flag = false;
@@ -841,6 +828,7 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
                 }
                 if (flag == false) {
                     cout << "Destination variable not found\n";
+                    succesfulExecution = false;
                     break;
                 }
             }
@@ -874,6 +862,7 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
                 }
                 if (flag == false) {
                     cout << "Destination variable not found\n";
+                    succesfulExecution = false;
                     break;
                 }
             }
@@ -897,6 +886,7 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
                 }
                 if (flag == false) {
                     cout << "Other variable not found\n";
+                    succesfulExecution = false;
                     break;
                 }
                 flag = false;
@@ -920,6 +910,7 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
                 }
                 if (flag == false) {
                     cout << "Destination variable not found\n";
+                    succesfulExecution = false;
                     break;
                 }
             }
@@ -950,7 +941,11 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
                     topFrame.localCount++;
                     flag = true;
                 }
-
+                else {
+                    cout << "Maximum local variables reached\n";
+                    succesfulExecution = false;
+                    break;
+                }
             }
         }
         else if (lineTokens[0].text == "func_end") {
@@ -985,33 +980,60 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
         }
     }
     fclose(resolveFile_fin);
+    return succesfulExecution && executed;
 }
-    
-void serializeString(FILE* fileP, const string& s) {
+
+bool serializeString(FILE* fileP, const string& s) {
     int32_t stringSize = s.size();
-    fwrite(&stringSize, sizeof(int32_t), 1, fileP);
-    fwrite(s.data(), 1, stringSize, fileP);
+    if (fwrite(&stringSize, sizeof(int32_t), 1, fileP) != 1) {
+        return false;
+    }
+    if (stringSize > 0) {
+        if (fwrite(s.data(), 1, stringSize, fileP) != stringSize) {
+            return false;
+        }
+    }
+    return true;
 }
-void serializeFrame(FILE* fileP, const Frame& frame) {
-    serializeString(fileP, frame.func_name);
-    fwrite(&frame.argc, sizeof(int32_t), 1, fileP);
+bool serializeFrame(FILE* fileP, const Frame& frame) {
+    if (!serializeString(fileP, frame.func_name)) {
+        return false;
+    }
+    if (fwrite(&frame.argc, sizeof(int32_t), 1, fileP) != 1) {
+        return false;
+    }
     for (int i = 0; i < frame.argc; i++) {
-        serializeString(fileP, frame.argv[i].name);
-        fwrite(&frame.argv[i].value, sizeof(int32_t), 1, fileP);
+        if (!serializeString(fileP, frame.argv[i].name)) {
+            return false;
+        }
+        if (fwrite(&frame.argv[i].value, sizeof(int32_t), 1, fileP) != 1) {
+            return false;
+        }
     }
-    fwrite(&frame.returnLine, sizeof(int64_t), 1, fileP);
-    fwrite(&frame.localCount, sizeof(int32_t), 1, fileP);
+    if (fwrite(&frame.returnLine, sizeof(int64_t), 1, fileP) != 1) {
+        return false;
+
+    }
+    if(fwrite(&frame.localCount, sizeof(int32_t), 1, fileP)!=1) {
+        return false;
+
+    }
     for (int i = 0; i < frame.localCount; i++) {
-        serializeString(fileP, frame.locals[i].name);
-        fwrite(&frame.locals[i].value, sizeof(int32_t), 1, fileP);
+        if (!serializeString(fileP, frame.locals[i].name)) {
+            return false;
+        }
+        if (fwrite(&frame.locals[i].value, sizeof(int32_t), 1, fileP) != 1) {
+            return false;
+        }
     }
+    return true;
 }
-void writeTdbg(Timeline& timeline, const char* tdbgPath)
+bool writeTdbg(Timeline& timeline, const char* tdbgPath)
 {
     FILE* fileTdbg = fopen(tdbgPath, "wb+");
     if (!fileTdbg) {
         cout << "Unable to open\n";
-        return;
+        return false;
     }
     TTDBHeader header;
     header.magic[0] = 'T';
@@ -1021,10 +1043,14 @@ void writeTdbg(Timeline& timeline, const char* tdbgPath)
     header.version = 1;
     header.indexOffset = 0;
     header.stepCount = timeline.getStepCount();
-    writeHeader(fileTdbg, header);
-    if (header.stepCount == 0) {
+    if (!writeHeader(fileTdbg, header)) {
+        cout << "Failed to write header\n";
         fclose(fileTdbg);
-        return;
+        return false;
+    }
+    if (header.stepCount <= 0) {
+        fclose(fileTdbg);
+        return false;
     }
     int64_t snapOffset;
     int64_t* snapshotPosition = new int64_t[header.stepCount];
@@ -1033,54 +1059,433 @@ void writeTdbg(Timeline& timeline, const char* tdbgPath)
     int snapCount = 0;
     while (snap != nullptr) {
         snapOffset = ftell(fileTdbg);
+        if (snapOffset == -1) {
+            cout << "Failed to get snapshot offset\n";
+            delete[] snapshotPosition;
+            fclose(fileTdbg);
+            return false;
+        }
         if (snapCount >= header.stepCount) {
             cout << "Too many snapshots\n";
             delete[] snapshotPosition;
             fclose(fileTdbg);
-            return;
+            return false;
         }
         snapshotPosition[snapCount++] = snapOffset;
-        fwrite(&snap->data->stackDepth, sizeof(int32_t), 1, fileTdbg);
+        if (fwrite(&snap->data->stackDepth, sizeof(int32_t), 1, fileTdbg) != 1) {
+            cout << "Failed to write stack depth\n";
+            delete[] snapshotPosition;
+            fclose(fileTdbg);
+            return false;
+        }
         for (int i = 0; i < snap->data->stackDepth; i++) {
-            serializeFrame(fileTdbg, snap->data->callStack[i]);
+            if (!serializeFrame(fileTdbg, snap->data->callStack[i])) {
+                cout << "Failed to serialize frame\n";
+                delete[] snapshotPosition;
+                fclose(fileTdbg);
+                return false;
+            }
         }
         snap = snap->next;
     }
     header.indexOffset = ftell(fileTdbg);
+    if (header.indexOffset == -1) {
+        cout << "Failed to get header offset\n";
+        delete[] snapshotPosition;
+        fclose(fileTdbg);
+        return false;
+    }
     if (snapCount != header.stepCount) {
         cout << "Snapshot count mismatch\n";
         delete[] snapshotPosition;
         fclose(fileTdbg);
-        return;
+        return false;
     }
-    fwrite(snapshotPosition, sizeof(int64_t), snapCount, fileTdbg);
-    fseek(fileTdbg, 0, SEEK_SET);
-    writeHeader(fileTdbg, header);
+    if (fwrite(snapshotPosition, sizeof(int64_t), snapCount, fileTdbg) != snapCount) {
+        cout << "Failed to write dense index\n";
+        delete[] snapshotPosition;
+        fclose(fileTdbg);
+        return false;
+    }
+    if (fseek(fileTdbg, 0, SEEK_SET) != 0) {
+        cout << "Failed to move to beginning of file\n";
+        delete[] snapshotPosition;
+        fclose(fileTdbg);
+        return false;
+    }
+    if (!writeHeader(fileTdbg, header)) {
+        cout << "Failed to write header\n";
+        delete[] snapshotPosition;
+        fclose(fileTdbg);
+        return false;
+    }
 
     delete[] snapshotPosition;
-    fclose(fileTdbg);
+    if (fclose(fileTdbg) != 0) {
+        cout << "Failed to close TDBG file properly\n";
+        return false;
+    }
+
+    return true;
+}
+
+int listeningSocket(int port) {
+    int serverSocket = socket(AF_INET, SOCK_STREAM, 0);
+    if (serverSocket == -1) {
+        perror("Socket creation failed");
+        return -1;
+    }
+    int opt = 1;
+
+    if (setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR,
+        &opt, sizeof(opt)) == -1) {
+        perror("setsockopt failed");
+        close(serverSocket);
+        return -1;
+    }
+    sockaddr_in serverAddress{};
+
+    serverAddress.sin_family = AF_INET;
+    serverAddress.sin_addr.s_addr = INADDR_ANY;
+    serverAddress.sin_port = htons(port);
+    if (bind(serverSocket, (struct sockaddr*)&serverAddress, sizeof(serverAddress)) == -1) {
+        perror("failed bind\n");
+        close(serverSocket);
+        return -1;
+    }
+    if (listen(serverSocket, 10) == -1) {
+        perror("falied listening");
+        close(serverSocket);
+        return -1;
+    }
+
+    cout << "Server listening on port " << port << endl;
+
+    return serverSocket;
+}
+
+int acceptClient(int Socketserver){
+    
+    sockaddr_in clientAddress{};
+
+    socklen_t clientAddressLength = sizeof(clientAddress);
+
+    
+    int clientSocket = accept(Socketserver,(struct sockaddr*)&clientAddress,&clientAddressLength);
+
+    
+    if (clientSocket == -1) {
+        perror("Accept failed");
+        return -1;
+    }
+
+   
+    cout << "Client connected from "<< inet_ntoa(clientAddress.sin_addr)<< ":" << ntohs(clientAddress.sin_port)<< endl;
+
+    return clientSocket;
+}
+bool receiveall_Bytes(int sock, char* buffer, size_t length){
+    size_t recievedT = 0;
+
+    while (recievedT < length){
+        int bytesReceived = recv(sock,buffer + recievedT,length - recievedT,0);
+
+        if (bytesReceived == 0){
+            return false;
+        }
+
+        if (bytesReceived == -1){
+            if (errno == EINTR){
+                continue;
+            }
+
+            perror("Didnt recieve. Failed to recieve");
+            return false;
+        }
+
+        recievedT = recievedT + bytesReceived;
+    }
+
+    return true;
+}
+
+bool sendAll_Bytes(int sock, const char* buffer, size_t length){
+    size_t SentT = 0;
+
+    while (SentT < length){
+        int bytesSent = send(sock,buffer + SentT,length - SentT,MSG_NOSIGNAL);
+
+        if (bytesSent == 0){
+            return false;
+        }
+
+        if (bytesSent == -1){
+            if (errno == EINTR){
+                continue;
+            }
+
+            perror("Couldnt send.Send failed");
+            return false;
+        }
+
+        SentT = SentT  + bytesSent;
+    }
+
+    return true;
+}
+
+bool receiveUpload(int clientSocket, const char* sourceFile){
+    
+    FILE* SourceFile = fopen(sourceFile, "wb");
+
+    if (SourceFile == nullptr){
+        perror("Could not open source file");
+        return false;
+    }
+
+    TrailerChecker T_checker;
+
+    char buffer[IO_BUFFER_SIZE];
+
+ 
+    bool statusReceived = false;
+    char status = -1;
+
+
+    uint64_t totalBytes_Source = 0;
+
+    vector<char> actualBytes;
+
+  
+    while (true){
+        int bytesReceived = recv(clientSocket,buffer,sizeof(buffer),0);
+
+        if (bytesReceived == 0){
+            break;
+        }
+
+        if (bytesReceived == -1){
+            if (errno == EINTR){
+                continue;
+            }
+
+            perror("Upload receive failed");
+            fclose(SourceFile);
+            remove(sourceFile);
+            return false;
+        }
+
+        T_checker.feed(buffer, bytesReceived, actualBytes);
+
+        
+        for (size_t i = 0; i < actualBytes.size(); i++) {
+            char byte = actualBytes[i];
+            if (!statusReceived){
+                status = byte;
+                statusReceived = true;
+
+                if (status != 0){
+                    cout << "Invalid upload status" << endl;
+                    fclose(SourceFile);
+                    remove(sourceFile);
+                    return false;
+                }
+
+                continue;
+            }
+
+            totalBytes_Source++;
+
+            if (totalBytes_Source > MAX_SOURCE_BYTES){
+                cout << "Source file exceeds maximum size" << endl;
+                fclose(SourceFile);
+                remove(sourceFile);
+                return false;
+            }
+
+            if (fwrite(&byte, 1, 1, SourceFile) != 1){
+                perror("File write failed");
+                fclose(SourceFile);
+                remove(sourceFile);
+                return false;
+            }
+        }
+    }
+
+    if (!statusReceived){
+        cout << "Empty upload message" << endl;
+        fclose(SourceFile);
+        remove(sourceFile);
+        return false;
+    }
+
+
+    if (!T_checker.verify()){
+        cout << "Upload checksum mismatch" << endl;
+        fclose(SourceFile);
+        remove(sourceFile);
+        return false;
+    }
+    if (totalBytes_Source == 0) {
+        cout << "Received source file is empty" << endl;
+        fclose(SourceFile);
+        remove(sourceFile);
+        return false;
+    }
+    if (fclose(SourceFile) != 0) {
+        perror("Failed to close source file");
+        remove(sourceFile);
+        return false;
+    }
+
+    cout << "Source file received successfully" << endl;
+    return true;
+}
+bool sendResponse(int clientSocket, uint8_t status,const char* filePath,const string& errorMsg){
+    CRC32 Cal_checksum;
+
+    FILE* tdbg_file = nullptr;
+
+    if (status == 0) {
+
+        tdbg_file = fopen(filePath, "rb");
+
+        if (tdbg_file == nullptr) {
+            perror("Could not open TDBG file");
+            return false;
+        }
+    }
+
+    char statusByte = static_cast<char>(status);
+
+    if (!sendAll_Bytes(clientSocket, &statusByte, 1)) {
+        if (tdbg_file != nullptr) {
+            fclose(tdbg_file);
+        }
+        return false;
+    }
+
+    Cal_checksum.update(&statusByte, 1);
+
+    if (status == 0){
+
+        char buffer[IO_BUFFER_SIZE];
+
+        while (true){
+            size_t bytesRead = fread(buffer, 1, sizeof(buffer), tdbg_file);
+
+            if (bytesRead > 0){
+                
+                Cal_checksum.update(buffer, bytesRead);
+
+         
+                if (!sendAll_Bytes(clientSocket, buffer, bytesRead)){
+                    fclose(tdbg_file);
+                    return false;
+                }
+            }
+
+            if (bytesRead < sizeof(buffer)){
+                if (feof(tdbg_file)){
+                    break;
+                }
+
+                if (ferror(tdbg_file)){
+                    perror("Error in reading TDBG file");
+                    fclose(tdbg_file);
+                    return false;
+                }
+            }
+        }
+
+        fclose(tdbg_file);
+    }
+    else{
+        if (!errorMsg.empty()){
+            Cal_checksum.update(errorMsg.data(), errorMsg.size());
+
+            if (!sendAll_Bytes(clientSocket,
+                errorMsg.data(),
+                errorMsg.size())){
+                return false;
+            }
+        }
+    }
+    uint32_t crcValue = Cal_checksum.value();
+
+    char checksumBytes[4];
+
+    checksumBytes[0] = static_cast<char>((crcValue >> 24) & 0xFF);
+    checksumBytes[1] = static_cast<char>((crcValue >> 16) & 0xFF);
+    checksumBytes[2] = static_cast<char>((crcValue >> 8) & 0xFF);
+    checksumBytes[3] = static_cast<char>(crcValue & 0xFF);
+
+    if (!sendAll_Bytes(clientSocket, checksumBytes, 4)){
+        return false;
+    }
+
+    return true;
+}
+
+bool clientRequest(int clientSocket) {
+    if (!receiveUpload(clientSocket, "source.bin")) {
+        sendResponse(clientSocket, 1, nullptr,"Failed to receive source file");
+        return false;
+    }
+    if (!validateProgram("source.bin")) {
+        sendResponse(clientSocket, 1, nullptr, "Program didnt pass validation");
+        return false;
+    }
+    int64_t mainOffset =resolveProgram("source.bin", "resolve.bin");
+
+    if (mainOffset == -1) {
+        sendResponse(clientSocket, 1, nullptr, "Program failed resolution");
+        return false;
+    }
+    Timeline prog_Timeline;
+    if (!executeProgram("resolve.bin", mainOffset, prog_Timeline)) {
+        sendResponse(clientSocket, 1, nullptr, "Failed execution");
+        return false;
+    }
+    if (!writeTdbg(prog_Timeline, "session.tdbg")){
+        sendResponse(clientSocket, 1, nullptr,"Failed to generate TDBG file");
+        return false;
+    }
+    if (!sendResponse(clientSocket, 0, "session.tdbg", "")){
+        cout << "Failed to send TDBG response\n";
+        return false;
+    }
+
+    return true;
 }
 // main section
-int32_t main()
+int32_t main(int argc, char* argv[])
 {
-    if (!validateProgram("source.bin"))
-    {
-        cout << "Failed at validateProgram()\n";
-        // send an error response instead of a .tdbg file
+    int port = 5001;
+    int serverSide_Socket = listeningSocket(port);
+    if (serverSide_Socket == -1) {
+        cout << "Failed to start server\n";
         return 1;
     }
-    cout << "Validation passed!\n";
 
-    int64_t mainOffset = resolveProgram("source.bin", "resolve.bin");
-    if (mainOffset < 0) {
-        cout << "Program resolution failed.\n";
-        return 1;
+    cout << "Server socket is listening and using the port " << port << endl;
+
+    while (true) {
+        int clientSide_Socket = acceptClient(serverSide_Socket);
+        if (clientSide_Socket == -1) {
+            continue;
+        }
+        cout << "Load Balancer connected\n";
+
+        clientRequest(clientSide_Socket);
+
+        shutdown(clientSide_Socket, SHUT_RDWR);
+        close(clientSide_Socket);
+
+        cout << "Client side connection closed\n";
     }
-    Timeline timeline;
-    executeProgram("resolve.bin", mainOffset, timeline);
-    
-    writeTdbg(timeline, "session.tdbg");
-    
+    close(serverSide_Socket);
 
     return 0;
 }
+   

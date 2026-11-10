@@ -87,3 +87,17 @@ PASS 0x0 — Source Validation
 - done with my serialization part i added 2 helper functions to serialze strging and other for serializing a frame as whole
 - tests my prog and its working successfully
 
+- 7 Nov
+- understood the prj
+
+- 8 Nov
+- added helper and now workig on the socket creation of the server
+- understanding it took time
+- implemented some functions
+
+- 10 Nov
+- implemented remaining functions 
+- only implemenedt helper and server files
+- Server established the connection and waits for the Load Balancer
+- it then recieved the source file and the all the phase 1then executed
+- it then serialized and sent the file back
